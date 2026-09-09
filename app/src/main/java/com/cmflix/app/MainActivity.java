@@ -30,7 +30,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean isFullscreen = false;
 
     private static final String HOME_URL =
-            "https://kkflix.xubi.org/";
+            "https://watch.cmflix.xubi.org/";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
