@@ -1,5 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 
 <resources>
+
     <string name="app_name">CM FLIX</string>
+
+    <string name="connection_error_title">
+        အင်တာနက်ချိတ်ဆက်မှု မရှိပါ
+    </string>
+
+    <string name="connection_error_message">
+        အင်တာနက် connection ကို စစ်ဆေးပြီး ပြန်လည်ကြိုးစားပါ။
+    </string>
+
+    <string name="retry">
+        ပြန်လည်ကြိုးစားမည်
+    </string>
+
+    <string name="downloading">
+        Download စတင်နေပါပြီ
+    </string>
+
+    <string name="download_failed">
+        Download မလုပ်နိုင်ပါ
+    </string>
+
 </resources>
