@@ -1,5 +1,9 @@
 package com.cmflix.app;
 
+import org.json.JSONArray;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import android.Manifest;
 import android.app.DownloadManager;
 import android.content.Context;
@@ -60,6 +64,12 @@ public class MainActivity extends AppCompatActivity {
     private boolean waitingForNetwork = false;
 
     private String failedUrl = HOME_URL;
+    /*
+ * လက်ရှိ watch page ထဲက movie/episode title ကို
+ * download filename အဖြစ် သုံးရန်။
+ */
+private String currentMediaTitle = "";
+
 
     /*
      * Android 9 နှင့်အောက်မှာ storage permission တောင်းနေချိန်
@@ -220,13 +230,20 @@ public class MainActivity extends AppCompatActivity {
 
                 if (!pageLoadFailed) {
 
-                    waitingForNetwork = false;
-                    showWebView();
+    waitingForNetwork = false;
+    showWebView();
 
-                    CookieManager
-                            .getInstance()
-                            .flush();
-                }
+    CookieManager
+            .getInstance()
+            .flush();
+
+    /*
+     * Watch page ထဲက movie/episode title ကိုယူထားမယ်။
+     * DownloadListener က filename ရှာတဲ့အခါ သုံးမယ်။
+     */
+    captureCurrentMediaTitle(view);
+}
+
             }
 
             @Override
@@ -431,39 +448,75 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void openPopupUrl(
-            String url,
-            WebView popupWebView
-    ) {
+        String url,
+        WebView popupWebView
+) {
 
-        popupWebView.stopLoading();
-
-        /*
-         * Movie/file extension ပါတဲ့ target="_blank" link ဆိုရင်
-         * WebView ထဲမဖွင့်ဘဲ တိုက်ရိုက် download လုပ်ပါမယ်။
-         */
-        if (isDirectDownloadUrl(url)) {
-
-            startDownload(
-                    url,
-                    webView
-                            .getSettings()
-                            .getUserAgentString(),
-                    null,
-                    guessMimeType(url)
-            );
-
-        } else if (url.startsWith("http://")
-                || url.startsWith("https://")) {
-
-            webView.loadUrl(url);
-
-        } else {
-
-            openExternalApplication(url);
-        }
+    if (url == null
+            || url.trim().isEmpty()) {
 
         popupWebView.destroy();
+        return;
     }
+
+    if (isDirectDownloadUrl(url)
+            || isSignedStreamUrl(url)) {
+
+        startDownload(
+                url,
+                webView
+                        .getSettings()
+                        .getUserAgentString(),
+                null,
+                guessMimeType(url)
+        );
+
+        popupWebView.stopLoading();
+        popupWebView.destroy();
+        return;
+    }
+
+    if (url.startsWith("http://")
+            || url.startsWith("https://")) {
+
+        /*
+         * Normal web link ဖြစ်ရင် popup WebView ထဲမှာ အရင် load လုပ်ခွင့်ပေးမယ်။
+         * Redirect ပြီး download response ရောက်လာရင်
+         * popup DownloadListener က ဖမ်းပါလိမ့်မယ်။
+         */
+        popupWebView.loadUrl(url);
+        return;
+    }
+
+    openExternalApplication(url);
+
+    popupWebView.stopLoading();
+    popupWebView.destroy();
+}
+private boolean isSignedStreamUrl(
+        String url
+) {
+
+    try {
+
+        Uri uri = Uri.parse(url);
+
+        String path = uri.getPath();
+
+        if (path == null) {
+            return false;
+        }
+
+        path = path.toLowerCase(Locale.US);
+
+        return path.startsWith("/stream/")
+                || path.contains("/stream/");
+
+    } catch (Exception ignored) {
+
+        return false;
+    }
+}
 
     private boolean isDirectDownloadUrl(String url) {
 
@@ -758,116 +811,685 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void enqueueDownload(
-            String url,
-            String userAgent,
-            String contentDisposition,
-            String mimeType
-    ) {
+        String url,
+        String userAgent,
+        String contentDisposition,
+        String mimeType
+) {
+
+    try {
+
+        Uri downloadUri = Uri.parse(url);
+
+        String fileName = buildDownloadFileName(
+                url,
+                contentDisposition,
+                mimeType
+        );
+
+        DownloadManager.Request request =
+                new DownloadManager.Request(downloadUri);
+
+        String finalMimeType = mimeType;
+
+        if (finalMimeType == null
+                || finalMimeType.trim().isEmpty()
+                || finalMimeType.equalsIgnoreCase(
+                "application/octet-stream"
+        )) {
+
+            finalMimeType = guessMimeType(url);
+        }
+
+        if (finalMimeType != null
+                && !finalMimeType.trim().isEmpty()) {
+
+            request.setMimeType(finalMimeType);
+        }
+
+        /*
+         * WebView နဲ့ DownloadManager ရဲ့ User-Agent တူအောင်လုပ်မယ်။
+         * Signed/protected stream server က UA စစ်ရင် အသုံးဝင်ပါတယ်။
+         */
+        String finalUserAgent = userAgent;
+
+        if (finalUserAgent == null
+                || finalUserAgent.trim().isEmpty()) {
+
+            finalUserAgent =
+                    webView
+                            .getSettings()
+                            .getUserAgentString();
+        }
+
+        if (finalUserAgent != null
+                && !finalUserAgent.trim().isEmpty()) {
+
+            request.addRequestHeader(
+                    "User-Agent",
+                    finalUserAgent
+            );
+        }
+
+        /*
+         * Video server က encoded/gzip response ပြန်မပေးဘဲ
+         * raw bytes ပြန်ပေးရန်။
+         */
+        request.addRequestHeader(
+                "Accept-Encoding",
+                "identity"
+        );
+
+        request.addRequestHeader(
+                "Accept",
+                "video/*,application/octet-stream,*/*"
+        );
+
+        /*
+         * Signed stream route မှာ Referer/Origin စစ်ထားနိုင်လို့
+         * website origin ကို အတိအကျထည့်ပေးမယ်။
+         */
+        request.addRequestHeader(
+                "Origin",
+                "https://watch.cmflix.xubi.org"
+        );
+
+        String referer = webView.getUrl();
+
+        if (referer == null
+                || !referer.startsWith(
+                "https://watch.cmflix.xubi.org/"
+        )) {
+
+            referer = HOME_URL;
+        }
+
+        request.addRequestHeader(
+                "Referer",
+                referer
+        );
+
+        /*
+         * Download URL က stream proxy domain ဖြစ်နိုင်ပါတယ်။
+         * CookieManager.getCookie(url) တစ်ခုတည်းသုံးရင်
+         * main website session cookie မရနိုင်ပါ။
+         */
+        CookieManager cookieManager =
+                CookieManager.getInstance();
+
+        String downloadUrlCookies =
+                cookieManager.getCookie(url);
+
+        String websiteCookies =
+                cookieManager.getCookie(HOME_URL);
+
+        String finalCookies =
+                mergeCookies(
+                        downloadUrlCookies,
+                        websiteCookies
+                );
+
+        /*
+         * CM FLIX website/stream proxy ဖြစ်မှသာ
+         * website login cookie ကို ထည့်ပေးမယ်။
+         * အခြား third-party video host ဆီ login cookie မပို့ပါ။
+         */
+        if (isTrustedCmFlixHost(downloadUri)
+                && finalCookies != null
+                && !finalCookies.trim().isEmpty()) {
+
+            request.addRequestHeader(
+                    "Cookie",
+                    finalCookies
+            );
+
+        } else if (downloadUrlCookies != null
+                && !downloadUrlCookies.trim().isEmpty()) {
+
+            request.addRequestHeader(
+                    "Cookie",
+                    downloadUrlCookies
+            );
+        }
+
+        request.setTitle(fileName);
+        request.setDescription(
+                "CM FLIX - " + fileName
+        );
+
+        request.setAllowedOverMetered(true);
+        request.setAllowedOverRoaming(true);
+
+        request.setNotificationVisibility(
+                DownloadManager.Request
+                        .VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+        );
+
+        request.setDestinationInExternalPublicDir(
+                Environment.DIRECTORY_DOWNLOADS,
+                fileName
+        );
+
+        DownloadManager downloadManager =
+                (DownloadManager)
+                        getSystemService(
+                                Context.DOWNLOAD_SERVICE
+                        );
+
+        if (downloadManager == null) {
+
+            throw new IllegalStateException(
+                    "DownloadManager not available"
+            );
+        }
+
+        downloadManager.enqueue(request);
+
+        Toast.makeText(
+                this,
+                "Download စတင်နေပါပြီ\n" + fileName,
+                Toast.LENGTH_LONG
+        ).show();
+
+    } catch (Exception exception) {
+
+        Toast.makeText(
+                this,
+                "Download မလုပ်နိုင်ပါ: "
+                        + exception.getMessage(),
+                Toast.LENGTH_LONG
+        ).show();
+    }
+}
+private void captureCurrentMediaTitle(
+        WebView view
+) {
+
+    if (view == null) {
+        return;
+    }
+
+    String script =
+            "(function() {" +
+            "  var selectors = [" +
+            "    '[data-movie-title]'," +
+            "    '.movie-title'," +
+            "    '.watch-title'," +
+            "    '.video-title'," +
+            "    'main h1'," +
+            "    'h1'," +
+            "    'h2'" +
+            "  ];" +
+            "  var title = '';" +
+            "  for (var i = 0; i < selectors.length; i++) {" +
+            "    var element = document.querySelector(selectors[i]);" +
+            "    if (element && element.textContent) {" +
+            "      title = element.textContent.trim();" +
+            "      if (title) break;" +
+            "    }" +
+            "  }" +
+            "  if (!title) title = document.title || '';" +
+            "  return title;" +
+            "})();";
+
+    view.evaluateJavascript(
+            script,
+            value -> {
+
+                String title =
+                        decodeJavascriptString(value);
+
+                title = cleanPageTitle(title);
+
+                if (!title.isEmpty()) {
+                    currentMediaTitle = title;
+                }
+            }
+    );
+}
+
+private String decodeJavascriptString(
+        String javascriptValue
+) {
+
+    if (javascriptValue == null
+            || javascriptValue.equals("null")
+            || javascriptValue.equals("\"\"")) {
+
+        return "";
+    }
+
+    try {
+
+        /*
+         * evaluateJavascript callback က
+         * JSON encoded string ပြန်ပေးတာဖြစ်ပါတယ်။
+         */
+        JSONArray array =
+                new JSONArray(
+                        "[" + javascriptValue + "]"
+                );
+
+        return array.getString(0).trim();
+
+    } catch (Exception ignored) {
+
+        String value =
+                javascriptValue.trim();
+
+        if (value.startsWith("\"")
+                && value.endsWith("\"")
+                && value.length() >= 2) {
+
+            value = value.substring(
+                    1,
+                    value.length() - 1
+            );
+        }
+
+        return value
+                .replace("\\\"", "\"")
+                .replace("\\n", " ")
+                .replace("\\t", " ")
+                .replace("\\\\", "\\")
+                .trim();
+    }
+}
+
+private String cleanPageTitle(
+        String title
+) {
+
+    if (title == null) {
+        return "";
+    }
+
+    String cleaned = title.trim();
+
+    /*
+     * Page title ထဲက site name ကို ဖြုတ်မယ်။
+     */
+    cleaned = cleaned.replaceAll(
+            "(?i)\\s*[|\\-–—]\\s*CM\\s*FLIX\\s*$",
+            ""
+    );
+
+    cleaned = cleaned.replaceAll(
+            "(?i)^CM\\s*FLIX\\s*[|\\-–—]\\s*",
+            ""
+    );
+
+    cleaned = sanitizeFileName(cleaned);
+
+    if (cleaned.equalsIgnoreCase("CM FLIX")
+            || cleaned.equalsIgnoreCase("Downloads")
+            || cleaned.equalsIgnoreCase("Download")) {
+
+        return "";
+    }
+
+    return cleaned;
+}
+
+private String buildDownloadFileName(
+        String url,
+        String contentDisposition,
+        String mimeType
+) {
+
+    String extension =
+            getDownloadExtension(
+                    url,
+                    contentDisposition,
+                    mimeType
+            );
+
+    String title =
+            sanitizeFileName(currentMediaTitle);
+
+    /*
+     * Movie title မရရင် server header/URL က filename ကိုသုံးမယ်။
+     */
+    if (title.isEmpty()) {
+
+        String guessed =
+                URLUtil.guessFileName(
+                        url,
+                        contentDisposition,
+                        mimeType
+                );
+
+        title = removeFileExtension(
+                sanitizeFileName(guessed)
+        );
+    }
+
+    /*
+     * Signed stream filename က i75fb51dd37a ပုံစံဆိုရင်
+     * generic name ပြောင်းသုံးမယ်။
+     */
+    if (title.matches("(?i)^i[0-9a-f]{8,}$")
+            || title.matches("(?i)^[0-9a-f]{10,}$")
+            || title.equalsIgnoreCase("download")) {
+
+        title = "CM_FLIX_Movie";
+    }
+
+    if (title.isEmpty()) {
+        title = "CM_FLIX_Movie";
+    }
+
+    if (!extension.isEmpty()
+            && !title.toLowerCase(Locale.US)
+            .endsWith(extension.toLowerCase(Locale.US))) {
+
+        title += extension;
+    }
+
+    /*
+     * Android filesystem အတွက် filename အရှည်ကန့်သတ်မယ်။
+     */
+    if (title.length() > 180) {
+
+        String base =
+                removeFileExtension(title);
+
+        int maxBaseLength =
+                Math.max(
+                        1,
+                        180 - extension.length()
+                );
+
+        if (base.length() > maxBaseLength) {
+            base = base.substring(
+                    0,
+                    maxBaseLength
+            );
+        }
+
+        title = base + extension;
+    }
+
+    return title;
+}
+
+private String getDownloadExtension(
+        String url,
+        String contentDisposition,
+        String mimeType
+) {
+
+    String guessed =
+            URLUtil.guessFileName(
+                    url,
+                    contentDisposition,
+                    mimeType
+            );
+
+    String extension =
+            extractFileExtension(guessed);
+
+    if (extension.isEmpty()) {
 
         try {
 
-            String fileName =
-                    URLUtil.guessFileName(
-                            url,
-                            contentDisposition,
-                            mimeType
-                    );
+            String path =
+                    Uri.parse(url).getPath();
 
-            DownloadManager.Request request =
-                    new DownloadManager.Request(
-                            Uri.parse(url)
-                    );
+            extension =
+                    extractFileExtension(path);
 
-            if (mimeType != null
-                    && !mimeType.trim().isEmpty()) {
-
-                request.setMimeType(mimeType);
-            }
-
-            if (userAgent != null
-                    && !userAgent.trim().isEmpty()) {
-
-                request.addRequestHeader(
-                        "User-Agent",
-                        userAgent
-                );
-            }
-
-            /*
-             * Login/session လိုအပ်တဲ့ download URL တွေအတွက်
-             * WebView cookie ကို DownloadManager ဆီကူးပေးရပါမယ်။
-             */
-            String cookies =
-                    CookieManager
-                            .getInstance()
-                            .getCookie(url);
-
-            if (cookies != null
-                    && !cookies.trim().isEmpty()) {
-
-                request.addRequestHeader(
-                        "Cookie",
-                        cookies
-                );
-            }
-
-            String referer = webView.getUrl();
-
-            if (referer != null
-                    && (referer.startsWith("http://")
-                    || referer.startsWith("https://"))) {
-
-                request.addRequestHeader(
-                        "Referer",
-                        referer
-                );
-            }
-
-            request.setTitle(fileName);
-            request.setDescription("CM FLIX download");
-
-            request.setAllowedOverMetered(true);
-            request.setAllowedOverRoaming(true);
-
-            request.setNotificationVisibility(
-                    DownloadManager.Request
-                            .VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-            );
-
-            request.setDestinationInExternalPublicDir(
-                    Environment.DIRECTORY_DOWNLOADS,
-                    fileName
-            );
-
-            DownloadManager downloadManager =
-                    (DownloadManager)
-                            getSystemService(
-                                    Context.DOWNLOAD_SERVICE
-                            );
-
-            if (downloadManager == null) {
-                throw new IllegalStateException(
-                        "DownloadManager not available"
-                );
-            }
-
-            downloadManager.enqueue(request);
-
-            Toast.makeText(
-                    this,
-                    R.string.downloading,
-                    Toast.LENGTH_LONG
-            ).show();
-
-        } catch (Exception exception) {
-
-            Toast.makeText(
-                    this,
-                    R.string.download_failed,
-                    Toast.LENGTH_LONG
-            ).show();
+        } catch (Exception ignored) {
         }
     }
+
+    if (extension.isEmpty()
+            && mimeType != null) {
+
+        String mimeExtension =
+                android.webkit.MimeTypeMap
+                        .getSingleton()
+                        .getExtensionFromMimeType(
+                                mimeType
+                        );
+
+        if (mimeExtension != null
+                && !mimeExtension.trim().isEmpty()) {
+
+            extension =
+                    "." + mimeExtension;
+        }
+    }
+
+    /*
+     * ဒီ app မှာ movie download ဖြစ်တာများလို့
+     * server က MIME မပေးရင် mp4 ကို fallback သုံးမယ်။
+     */
+    if (extension.isEmpty()) {
+        extension = ".mp4";
+    }
+
+    return extension.toLowerCase(Locale.US);
+}
+
+private String extractFileExtension(
+        String fileName
+) {
+
+    if (fileName == null
+            || fileName.trim().isEmpty()) {
+
+        return "";
+    }
+
+    String cleanName = fileName;
+
+    try {
+        cleanName = URLDecoder.decode(
+                cleanName,
+                StandardCharsets.UTF_8.name()
+        );
+    } catch (Exception ignored) {
+    }
+
+    int queryIndex =
+            cleanName.indexOf('?');
+
+    if (queryIndex >= 0) {
+        cleanName =
+                cleanName.substring(
+                        0,
+                        queryIndex
+                );
+    }
+
+    int hashIndex =
+            cleanName.indexOf('#');
+
+    if (hashIndex >= 0) {
+        cleanName =
+                cleanName.substring(
+                        0,
+                        hashIndex
+                );
+    }
+
+    int slashIndex =
+            cleanName.lastIndexOf('/');
+
+    if (slashIndex >= 0) {
+        cleanName =
+                cleanName.substring(
+                        slashIndex + 1
+                );
+    }
+
+    int dotIndex =
+            cleanName.lastIndexOf('.');
+
+    if (dotIndex < 0
+            || dotIndex == cleanName.length() - 1) {
+
+        return "";
+    }
+
+    String extension =
+            cleanName.substring(dotIndex)
+                    .toLowerCase(Locale.US);
+
+    switch (extension) {
+
+        case ".mp4":
+        case ".mkv":
+        case ".avi":
+        case ".mov":
+        case ".webm":
+        case ".m4v":
+        case ".mp3":
+        case ".zip":
+        case ".rar":
+        case ".7z":
+        case ".apk":
+            return extension;
+
+        default:
+            return "";
+    }
+}
+
+private String removeFileExtension(
+        String fileName
+) {
+
+    if (fileName == null) {
+        return "";
+    }
+
+    int dotIndex =
+            fileName.lastIndexOf('.');
+
+    if (dotIndex > 0) {
+
+        String extension =
+                fileName.substring(dotIndex)
+                        .toLowerCase(Locale.US);
+
+        switch (extension) {
+
+            case ".mp4":
+            case ".mkv":
+            case ".avi":
+            case ".mov":
+            case ".webm":
+            case ".m4v":
+            case ".mp3":
+            case ".zip":
+            case ".rar":
+            case ".7z":
+            case ".apk":
+                return fileName
+                        .substring(0, dotIndex)
+                        .trim();
+
+            default:
+                break;
+        }
+    }
+
+    return fileName.trim();
+}
+
+private String sanitizeFileName(
+        String value
+) {
+
+    if (value == null) {
+        return "";
+    }
+
+    String result = value.trim();
+
+    /*
+     * Android/Linux filename မှာ ပြဿနာဖြစ်နိုင်တဲ့
+     * character တွေကို ဖြုတ်မယ်။
+     */
+    result = result.replaceAll(
+            "[\\\\/:*?\"<>|]",
+            "_"
+    );
+
+    result = result.replaceAll(
+            "[\\p{Cntrl}]",
+            ""
+    );
+
+    result = result.replaceAll(
+            "\\s+",
+            " "
+    );
+
+    result = result.replaceAll(
+            "^[. ]+|[. ]+$",
+            ""
+    );
+
+    return result.trim();
+}
+
+private String mergeCookies(
+        String first,
+        String second
+) {
+
+    String firstValue =
+            first == null
+                    ? ""
+                    : first.trim();
+
+    String secondValue =
+            second == null
+                    ? ""
+                    : second.trim();
+
+    if (firstValue.isEmpty()) {
+        return secondValue;
+    }
+
+    if (secondValue.isEmpty()) {
+        return firstValue;
+    }
+
+    if (firstValue.equals(secondValue)) {
+        return firstValue;
+    }
+
+    return firstValue + "; " + secondValue;
+}
+
+private boolean isTrustedCmFlixHost(
+        Uri uri
+) {
+
+    if (uri == null
+            || uri.getHost() == null) {
+
+        return false;
+    }
+
+    String host =
+            uri.getHost()
+                    .toLowerCase(Locale.US);
+
+    /*
+     * Web repo STREAM_PROXY_POOL မှာ တွေ့ရတဲ့
+     * CM FLIX stream domains တွေ။
+     */
+    return host.equals("watch.cmflix.xubi.org")
+            || host.endsWith(".cmflix.xubi.org")
+            || host.equals("kteam.cmflix.opik.net")
+            || host.equals("watch.flix.ezgateway.net");
+}
+
 
     @Override
     public void onRequestPermissionsResult(
